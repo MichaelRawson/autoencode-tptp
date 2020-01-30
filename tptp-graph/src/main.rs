@@ -1,6 +1,4 @@
 use glob::glob;
-use petgraph::graph::{Graph, NodeIndex};
-use petgraph::Directed;
 use tptp::parsers::tptp_input_iterator;
 use tptp::syntax::*;
 
@@ -31,41 +29,58 @@ pub enum NodeType {
     Problem,
 }
 
+type NodeIndex = u32;
+
 #[derive(Default)]
 struct TPTP {
     save: NodeIndex,
-    graph: Graph<NodeType, (), Directed, u32>,
+    nodes: Vec<NodeType>,
+    from: Vec<NodeIndex>,
+    to: Vec<NodeIndex>,
     defined: HashMap<String, NodeIndex>,
     functors: HashMap<String, NodeIndex>,
     variables: HashMap<String, NodeIndex>,
     terms: HashMap<(NodeIndex, Vec<NodeIndex>), NodeIndex>,
     includes: HashMap<PathBuf, Vec<NodeIndex>>,
     inputs: Vec<NodeIndex>,
+    problems: Vec<NodeIndex>,
 }
 
 impl TPTP {
     fn node(&mut self, node: NodeType) -> NodeIndex {
-        self.graph.add_node(node)
+        let index = self.nodes.len() as u32;
+        self.nodes.push(node);
+        index
     }
 
     fn edge(&mut self, from: NodeIndex, to: NodeIndex) {
-        self.graph.add_edge(from, to, ());
+        self.from.push(from);
+        self.to.push(to);
     }
 
     pub fn problem(&mut self, path: &PathBuf) {
         let contents = fs::read(path).unwrap();
         for input in &mut tptp_input_iterator::<()>(contents.as_slice()) {
             self.visit_tptp_input(input);
-            self.inputs.push(self.save);
         }
+
         let problem_index = self.node(NodeType::Problem);
         for input_index in mem::replace(&mut self.inputs, vec![]) {
             self.edge(problem_index, input_index);
         }
+        self.problems.push(problem_index);
+        self.save = problem_index;
     }
 
-    pub fn finish(self) -> Graph<NodeType, (), Directed, u32> {
-        self.graph
+    pub fn finish(
+        self,
+    ) -> (
+        Vec<NodeType>,
+        Vec<NodeIndex>,
+        Vec<NodeIndex>,
+        Vec<NodeIndex>,
+    ) {
+        (self.nodes, self.from, self.to, self.problems)
     }
 }
 
@@ -75,14 +90,13 @@ impl Visitor for TPTP {
         if let Some(indices) = self.includes.get(&path) {
             self.inputs.extend_from_slice(indices)
         } else {
+            let inputs_before = self.inputs.len();
             let contents = fs::read(&path).unwrap();
-            let mut indices = vec![];
             for input in &mut tptp_input_iterator::<()>(contents.as_slice()) {
                 self.visit_tptp_input(input);
-                indices.push(self.save);
             }
-            self.inputs.extend_from_slice(&indices);
-            self.includes.insert(path, indices);
+            let indices = &self.inputs[inputs_before..];
+            self.includes.insert(path, indices.to_vec());
         };
     }
 
@@ -137,21 +151,25 @@ impl Visitor for TPTP {
                     self.save = *index;
                 } else {
                     let (functor_index, argument_indices) = key;
-                    let application_index = self.node(NodeType::Application);
-                    self.edge(application_index, functor_index);
-
                     let mut auxiliary_indices = vec![];
+
                     for argument_index in &argument_indices {
                         let auxiliary_index = self.node(NodeType::Argument);
                         self.edge(auxiliary_index, *argument_index);
-                        self.edge(application_index, auxiliary_index);
                         auxiliary_indices.push(auxiliary_index);
                     }
+
                     for i in 1..auxiliary_indices.len() {
                         self.edge(
                             auxiliary_indices[i - 1],
                             auxiliary_indices[i],
                         );
+                    }
+
+                    let application_index = self.node(NodeType::Application);
+                    self.edge(application_index, functor_index);
+                    for auxiliary_index in auxiliary_indices {
+                        self.edge(application_index, auxiliary_index);
                     }
 
                     let key = (functor_index, argument_indices);
@@ -166,20 +184,26 @@ impl Visitor for TPTP {
         &mut self,
         infix: FofDefinedInfixFormula,
     ) {
-        let equality_index = self.node(NodeType::Equality);
         self.visit_fof_term(infix.left);
-        self.edge(equality_index, self.save);
+        let left = self.save;
         self.visit_fof_term(infix.right);
-        self.edge(equality_index, self.save);
+        let right = self.save;
+
+        let equality_index = self.node(NodeType::Equality);
+        self.edge(equality_index, left);
+        self.edge(equality_index, right);
         self.save = equality_index
     }
 
     fn visit_fof_infix_unary(&mut self, infix: FofInfixUnary) {
-        let disequality_index = self.node(NodeType::Disequality);
         self.visit_fof_term(infix.left);
-        self.edge(disequality_index, self.save);
+        let left = self.save;
         self.visit_fof_term(infix.right);
-        self.edge(disequality_index, self.save);
+        let right = self.save;
+
+        let disequality_index = self.node(NodeType::Disequality);
+        self.edge(disequality_index, left);
+        self.edge(disequality_index, right);
         self.save = disequality_index;
     }
 
@@ -187,8 +211,8 @@ impl Visitor for TPTP {
         use FofUnaryFormula::*;
         match unary {
             Unary(_, unit) => {
-                let negation_index = self.node(NodeType::Negation);
                 self.visit_fof_unit_formula(unit);
+                let negation_index = self.node(NodeType::Negation);
                 self.edge(negation_index, self.save);
                 self.save = negation_index;
             }
@@ -205,8 +229,8 @@ impl Visitor for TPTP {
             Forall => NodeType::Forall,
             Exists => NodeType::Exists,
         };
-        let quantifier_index = self.node(node_type);
 
+        let mut variable_indices = vec![];
         let mut restore = vec![];
         for variable in &quantified.bound.0 {
             let key = format!("{}", variable);
@@ -215,12 +239,16 @@ impl Visitor for TPTP {
             }
 
             let variable_index = self.node(NodeType::Variable);
+            variable_indices.push(variable_index);
             self.variables.insert(key, variable_index);
+        }
+        self.visit_fof_unit_formula(quantified.formula);
+
+        let quantifier_index = self.node(node_type);
+        self.edge(quantifier_index, self.save);
+        for variable_index in variable_indices {
             self.edge(quantifier_index, variable_index);
         }
-
-        self.visit_fof_unit_formula(quantified.formula);
-        self.edge(quantifier_index, self.save);
 
         for variable in &quantified.bound.0 {
             self.variables.remove(&format!("{}", variable));
@@ -291,19 +319,27 @@ impl Visitor for TPTP {
     }
 
     fn visit_fof_or_formula(&mut self, or: FofOrFormula) {
-        let or_index = self.node(NodeType::Or);
+        let mut child_indices = vec![];
         for child in or.0 {
             self.visit_fof_unit_formula(child);
-            self.edge(or_index, self.save);
+            child_indices.push(self.save);
+        }
+        let or_index = self.node(NodeType::Or);
+        for child_index in child_indices {
+            self.edge(or_index, child_index);
         }
         self.save = or_index;
     }
 
     fn visit_fof_and_formula(&mut self, and: FofAndFormula) {
-        let and_index = self.node(NodeType::And);
+        let mut child_indices = vec![];
         for child in and.0 {
             self.visit_fof_unit_formula(child);
-            self.edge(and_index, self.save);
+            child_indices.push(self.save);
+        }
+        let and_index = self.node(NodeType::And);
+        for child_index in child_indices {
+            self.edge(and_index, child_index);
         }
         self.save = and_index;
     }
@@ -319,59 +355,66 @@ impl Visitor for TPTP {
         };
         let input_index = self.node(node_type);
         self.edge(input_index, self.save);
+        self.inputs.push(input_index);
         self.save = input_index;
     }
 }
 
+fn typecast<T>(x: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            x.as_ptr() as *const u8,
+            x.len() * std::mem::size_of::<T>(),
+        )
+    }
+}
+
+fn write_file(name: &'static str, bytes: &[u8]) {
+    let mut file = fs::File::create(name).unwrap();
+    file.write_all(bytes).unwrap();
+}
+
+fn filter(problem: &str) -> bool {
+    problem.contains("CSR")
+        || problem.contains("HWV")
+        || problem.contains("SWV")
+        || problem.contains("SWW")
+        || problem.contains("MED011+1")
+        || problem.contains("NLP26")
+        || problem.contains("NUM92")
+        || problem.contains("GEO4")
+}
+
 fn main() {
     let mut tptp = TPTP::default();
-    for path in glob("**/*+*.p").unwrap() {
-        let path = path.unwrap();
-        eprintln!("{:?}", path);
-        if !(path.starts_with("Problems/SYN/")
-            || path.starts_with("Problems/SYO/")
-            || path.starts_with("Problems/CSR/")
-            || path.starts_with("Problems/HWV/")
-            || path.starts_with("Problems/SWV/")
-            || path.starts_with("Problems/SWW/"))
-        {
-            tptp.problem(&path);
+    for (index, path) in glob("**/*+*.p").unwrap().enumerate() {
+        if index % 10 == 0 {
+            let path = path.unwrap();
+            let problem = path.file_stem().unwrap().to_string_lossy();
+            if !filter(&problem) {
+                let old_nodes = tptp.nodes.len();
+                tptp.problem(&path);
+                let nodes_processed = tptp.nodes.len() - old_nodes;
+                println!("{}", &problem[0..3].to_string());
+                eprintln!("{} - {}", nodes_processed, problem);
+            }
         }
     }
-    let graph = tptp.finish();
-    eprintln!("{} nodes, {} edges", graph.node_count(), graph.edge_count());
-    let (nodes, edges) = graph.into_nodes_edges();
+    let (nodes, from, to, problems) = tptp.finish();
+    eprintln!(
+        "{} problems, {} nodes, {} edges",
+        problems.len(),
+        nodes.len(),
+        from.len()
+    );
 
-    {
-        eprintln!("writing nodes.dat...");
-        let bytes: Vec<u8> =
-            nodes.into_iter().map(|node| node.weight as u8).collect();
-        let mut node_file = fs::File::create("nodes.dat").unwrap();
-        node_file.write_all(&bytes).unwrap();
-    }
-    {
-        eprintln!("writing edges.dat...");
-        let mut from = vec![];
-        let mut to = vec![];
-        for edge in edges {
-            from.push(edge.source().index() as i64);
-            to.push(edge.target().index() as i64);
-        }
-        let from_bytes = unsafe {
-            std::slice::from_raw_parts(
-                from.as_ptr() as *const u8,
-                from.len() * std::mem::size_of::<i64>(),
-            )
-        };
-        let to_bytes = unsafe {
-            std::slice::from_raw_parts(
-                to.as_ptr() as *const u8,
-                to.len() * std::mem::size_of::<i64>(),
-            )
-        };
-        let mut edge_file = fs::File::create("edges.dat").unwrap();
-        edge_file.write_all(&from_bytes).unwrap();
-        edge_file.write_all(&to_bytes).unwrap();
-    }
+    eprintln!("writing nodes.dat...");
+    write_file("nodes.dat", typecast(&nodes));
+    eprintln!("writing from.dat...");
+    write_file("from.dat", typecast(&from));
+    eprintln!("writing to.dat...");
+    write_file("to.dat", typecast(&to));
+    eprintln!("writing problems.dat...");
+    write_file("problems.dat", typecast(&problems));
     eprintln!("OK")
 }

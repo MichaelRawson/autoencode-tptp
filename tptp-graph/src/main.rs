@@ -387,23 +387,21 @@ fn filter(problem: &str) -> bool {
 
 fn main() {
     let mut tptp = TPTP::default();
-    for (index, path) in glob("**/*+*.p").unwrap().enumerate() {
-        if index % 10 == 0 {
-            let path = path.unwrap();
-            let problem = path.file_stem().unwrap().to_string_lossy();
-            if !filter(&problem) {
-                let old_nodes = tptp.nodes.len();
-                tptp.problem(&path);
-                let nodes_processed = tptp.nodes.len() - old_nodes;
-                println!("{}", &problem[0..3].to_string());
-                eprintln!("{} - {}", nodes_processed, problem);
-            }
+    for path in glob("**/*+*.p").unwrap() {
+        let path = path.unwrap();
+        let problem = path.file_stem().unwrap().to_string_lossy();
+        if !filter(&problem) {
+            let old_nodes = tptp.nodes.len();
+            tptp.problem(&path);
+            let nodes_processed = tptp.nodes.len() - old_nodes;
+            println!("{}", problem);
+            eprintln!("{} - {}", nodes_processed, problem);
         }
     }
-    let (nodes, from, to, problems) = tptp.finish();
+    let (nodes, from, to, indices) = tptp.finish();
     eprintln!(
         "{} problems, {} nodes, {} edges",
-        problems.len(),
+        indices.len(),
         nodes.len(),
         from.len()
     );
@@ -414,7 +412,7 @@ fn main() {
     write_file("from.dat", typecast(&from));
     eprintln!("writing to.dat...");
     write_file("to.dat", typecast(&to));
-    eprintln!("writing problems.dat...");
-    write_file("problems.dat", typecast(&problems));
+    eprintln!("writing indices.dat...");
+    write_file("indices.dat", typecast(&indices));
     eprintln!("OK")
 }

@@ -1,27 +1,24 @@
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas
 import torch
 from torch.optim import SGD
 from torch.nn.functional import cross_entropy
-from torch.nn.utils import clip_grad_norm_
+from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch_cluster import random_walk
-from torch_geometric.data import Data, NeighborSampler
-from torch_geometric.utils import subgraph, to_undirected
+from torch_geometric.data import Data
+from torch_geometric.utils import subgraph
 from torch.utils.tensorboard import SummaryWriter
-import seaborn as sns
 
-from concurrent.futures import ThreadPoolExecutor# as TPEBase
-from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
 
-from model import Encoder, Decoder
+from model import Model
 
 INPUTS = 16
 CHANNELS = 8
-DIMENSIONS = 2
-LAYERS = 16
+DIMENSIONS = 32
+LAYERS = 12
 SAMPLE_WALKS = 10000
 LR = 5e-3
+MOMENTUM = 0.95
 BATCH = 16
 
 def load():
@@ -39,16 +36,16 @@ def load():
 
     print("loading problem indices...")
     problem_index = torch.tensor(
-        np.fromfile('tptp-graph/problems.dat', dtype=np.uint32)
+        np.fromfile('tptp-graph/indices.dat', dtype=np.uint32)
             .astype(np.int64)
     )
 
-    print("loading domains...")
-    domains = open('tptp-graph/domain.dat').read().split('\n')
+    print("loading names...")
+    problems = open('tptp-graph/problems.dat').read().split('\n')
 
     graph = Data(x=x, edge_index=edge_index)
     print("done")
-    return graph, problem_index, domains
+    return graph, problem_index, problems
 
 def sample(graph, problem_index):
     start = problem_index.repeat(SAMPLE_WALKS)
@@ -56,7 +53,7 @@ def sample(graph, problem_index):
         graph.edge_index[0],
         graph.edge_index[1],
         start,
-        walk_length=LAYERS
+        walk_length=2 * LAYERS
     )
     visited = torch.unique(walks)
     x = graph.x[visited]
@@ -66,70 +63,62 @@ def sample(graph, problem_index):
         relabel_nodes=True,
         num_nodes=len(graph.x)
     )
-    problem_index = (visited == problem_index).nonzero().squeeze()
-
     data = Data(x=x, edge_index=edge_index)
-    data.problem_index = problem_index
     return data
 
 def train():
-    sns.set()
-    graph, problem_index, domains = load()
+    graph, problem_index, problems = load()
 
-    encoder = Encoder(
+    model = Model(
         inputs=INPUTS,
-        outputs=DIMENSIONS,
+        dimensions=DIMENSIONS,
         channels=CHANNELS,
         layers=LAYERS
     ).to('cuda')
-    decoder = Decoder(
-            inputs=DIMENSIONS,
-            outputs=INPUTS,
-            channels=CHANNELS,
-            layers=LAYERS
-    ).to('cuda')
-    parameters = list(encoder.parameters()) + list(decoder.parameters())
-    optimizer = SGD(parameters, lr=LR / BATCH)
-
+    optimizer = SGD(
+        model.parameters(),
+        lr=LR/BATCH,
+        nesterov=True,
+        momentum=MOMENTUM
+    )
     writer = SummaryWriter()
-    epoch = 1
+
     example = 1
+    checkpoint = 1
     while True:
-        x_coords = []
-        y_coords = []
-        domain_coords = []
+        epoch_means = []
+        epoch_labels = []
+
         shuffled = torch.randperm(len(problem_index))
-        print(f"epoch {epoch}...")
-        for step, (domain, data) in enumerate(
+        for step, (problem, data) in enumerate(
             ThreadPoolExecutor(1).map(
                 lambda index: (
-                    domains[index],
+                    problems[index],
                     sample(graph, problem_index[index])
                 ),
                 shuffled
             )
         ):
             if step != 0 and step % BATCH == 0:
-                clip_grad_norm_(parameters, BATCH * 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
 
-            data = data.to('cuda')
-            x = data.x
-            edge_index = data.edge_index
+            print(data)
+            try:
+                data = data.to('cuda')
+                x = data.x
+                edge_index = data.edge_index
 
-            mean, log_variance = encoder(x, edge_index)
-            std = torch.exp(0.5 * log_variance)
-            random = torch.randn_like(std)
-            z = mean + random * std
-            y = decoder(z.repeat(len(x), 1), edge_index)
-
-            reconstruction_loss = cross_entropy(y, x)
-            divergence_loss = -0.5 * torch.sum(
-                1 + log_variance - mean.pow(2) - log_variance.exp()
-            )
-            loss = reconstruction_loss + divergence_loss
-            loss.backward()
+                mean, variance, y = model(x, edge_index)
+                reconstruction_loss = cross_entropy(y, x)
+                divergence_loss = -0.5 * torch.sum(
+                    1 + torch.log(variance) - mean.pow(2) - variance
+                )
+                loss = reconstruction_loss + divergence_loss
+                loss.backward()
+            except RuntimeError:
+                print("OOM")
+                continue
 
             writer.add_scalar(
                 'loss/reconstruction',
@@ -142,37 +131,25 @@ def train():
                 example
             )
             example += 1
+            epoch_means.append(mean.detach().to('cpu'))
+            epoch_labels.append([problem, problem[:3]])
 
-            x_coords.append(mean[0].item())
-            y_coords.append(mean[1].item())
-            domain_coords.append(domain)
-
-        data = pandas.DataFrame({
-            'x': x_coords,
-            'y': y_coords,
-            'hue': domain_coords,
-        })
-        sns.relplot(
-            x='x',
-            y='y',
-            hue='hue',
-            hue_order=sorted(set(domain_coords)),
-            data=data
+        epoch_means = torch.stack(epoch_means)
+        writer.add_embedding(
+            epoch_means,
+            metadata=epoch_labels,
+            metadata_header=['label', 'domain'],
+            global_step=checkpoint
         )
-        plt.xlim(-1.2, 1.2)
-        plt.ylim(-1.2, 1.2)
-        plt.gcf().set_size_inches(12, 10)
-        plt.savefig(f"figs/epoch-{epoch}.png")
-        plt.close()
-
-        for name, parameter in encoder.named_parameters():
+        for name, parameter in model.named_parameters():
             if parameter.requires_grad:
                 writer.add_histogram(
                     name.replace('.', '/'),
                     parameter.data,
-                    epoch
+                    checkpoint
                 )
-        epoch += 1
+        torch.save(model.state_dict(), 'model.pt')
+        checkpoint += 1
 
 if __name__ == '__main__':
     train()

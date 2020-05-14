@@ -5,17 +5,6 @@ import torch.nn.functional as F
 
 EPS = 1e-8
 
-def disk(tensor, name):
-    storage = torch.FloatStorage.from_file(
-        f'scratch/{name}.dat',
-        shared=True,
-        size=tensor.numel()
-    )
-    saved = torch.FloatTensor(storage).view(tensor.shape)
-    saved.copy_(tensor)
-    del tensor
-    return saved
-
 class Encoder(Module):
     def __init__(self, inputs=None, outputs=None, channels=None, layers=None):
         super().__init__()
@@ -29,13 +18,11 @@ class Encoder(Module):
 
     def forward(self, nodes, matrix, problem_index):
         x = self.embed(nodes)
-        x = disk(x, 'encoder-embed')
         for i in range(len(self.transform)):
             print(f"encoder layer: {i}")
             transformed = self.transform[i](x)
-            x = disk(transformed, f'encoder-transformed-{i}')
             convolved = matrix @ x
-            x = disk(convolved, f'encoder-conv-{i}')
+            x = convolved
             F.relu_(x)
             del transformed, convolved
 
@@ -56,18 +43,15 @@ class Decoder(Module):
 
     def forward(self, x, z, matrix, problem_index):
         x[problem_index] = self.input(z)
-        x = disk(x, 'decoder-embed')
         for i in range(len(self.transform)):
             print(f"decoder layer: {i}")
             transformed = self.transform[i](x)
-            x = disk(transformed, f'decoder-transformed-{i}')
             convolved = matrix @ x
-            x = disk(convolved, f'decoder-conv-{i}')
+            x = convolved
             F.relu_(x)
             del transformed, convolved
 
         x = self.output(x)
-        x = disk(x, 'decoder-output')
         return x
 
 class Model(Module):

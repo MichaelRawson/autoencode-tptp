@@ -1,81 +1,84 @@
 import torch
-from torch.nn import Embedding, Linear, Module, ModuleList, Parameter
-from torch.nn.init import xavier_normal_, zeros_
-import torch.nn.functional as F
+from torch.nn import BatchNorm1d, Embedding, Linear, Module, ModuleList
+from torch.nn.functional import relu
+from torch_scatter import scatter_mean
 
+NODE_TYPES = 13
+CHANNELS = 32
+DIMENSIONS = 16
+LAYERS = 8
 EPS = 1e-8
 
-class Encoder(Module):
-    def __init__(self, inputs=None, outputs=None, channels=None, layers=None):
+class Conv(Module):
+    def __init__(self):
         super().__init__()
-        self.embed = Embedding(inputs, channels)
-        self.transform = ModuleList([
-            Linear(channels, channels)
-            for _ in range(layers)
-        ])
-        self.mean = Linear(channels, outputs)
-        self.variance = Linear(channels, outputs)
+        self.bn = BatchNorm1d(CHANNELS)
+        self.weight = Linear(CHANNELS, CHANNELS)
+        torch.nn.init.xavier_normal_(self.weight.weight)
 
-    def forward(self, nodes, matrix, problem_index):
+    def forward(self, x, sources, targets):
+        x = scatter_mean(x[sources], targets, dim_size=x.shape[0], dim=0)
+        x = self.bn(x)
+        return relu(self.weight(x))
+
+class BiConv(Module):
+    def __init__(self):
+        super().__init__()
+        self.out = Conv()
+        self.back = Conv()
+
+    def forward(self, x, sources, targets):
+        out = self.out(x, sources, targets)
+        back = self.back(x, targets, sources)
+        return out + back
+
+class Encoder(Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = Embedding(NODE_TYPES, CHANNELS)
+        self.conv = ModuleList([BiConv() for _ in range(LAYERS)])
+        self.mean = Linear(CHANNELS, DIMENSIONS)
+        self.variance = Linear(CHANNELS, DIMENSIONS)
+
+    def forward(self, nodes, sources, targets):
         x = self.embed(nodes)
-        for i in range(len(self.transform)):
-            print(f"encoder layer: {i}")
-            transformed = self.transform[i](x)
-            convolved = matrix @ x
-            x = convolved
-            F.relu_(x)
-            del transformed, convolved
+        for conv in self.conv:
+            x += conv(x, sources, targets)
 
-        x = x[problem_index]
-        mean = 2 * torch.tanh(self.mean(x))
-        variance = 2 * torch.sigmoid(self.variance(x))
-        return mean, variance
+        x = torch.mean(x, dim=0)
+        mean = self.mean(x)
+        log_variance = self.variance(x)
+        return mean, log_variance
 
 class Decoder(Module):
-    def __init__(self, inputs=None, outputs=None, channels=None, layers=None):
+    def __init__(self):
         super().__init__()
-        self.input = Linear(inputs, channels)
-        self.transform = ModuleList([
-            Linear(channels, channels)
-            for _ in range(layers)
-        ])
-        self.output = Linear(channels, outputs)
+        self.input = Linear(DIMENSIONS, CHANNELS)
+        self.conv = ModuleList([BiConv() for _ in range(LAYERS)])
+        self.output = Linear(CHANNELS, NODE_TYPES)
 
-    def forward(self, x, z, matrix, problem_index):
-        x[problem_index] = self.input(z)
-        for i in range(len(self.transform)):
-            print(f"decoder layer: {i}")
-            transformed = self.transform[i](x)
-            convolved = matrix @ x
-            x = convolved
-            F.relu_(x)
-            del transformed, convolved
+    def forward(self, x, sources, targets):
+        x = relu(self.input(x))
+        for conv in self.conv:
+            x += conv(x, sources, targets)
 
-        x = self.output(x)
+        x = self.output(relu(x))
         return x
 
 class Model(Module):
-    def __init__(self, inputs=None, dimensions=None, channels=None, layers=None):
+    def __init__(self):
         super().__init__()
-        self.channels = channels
-        self.encoder = Encoder(
-            inputs=inputs,
-            outputs=dimensions,
-            channels=channels,
-            layers=layers
-        )
-        self.decoder = Decoder(
-            inputs=dimensions,
-            outputs=inputs,
-            channels=channels,
-            layers=layers
-        )
+        self.encoder = Encoder()
+        self.decoder = Decoder()
 
-    def forward(self, nodes, matrix_forward, matrix_back, problem_index):
-        mean, variance = self.encoder(nodes, matrix_back, problem_index)
-        std = torch.sqrt(variance + EPS)
+    def forward(self, nodes, sources, targets):
+        mean, log_variance = self.encoder(nodes, sources, targets)
+        std = torch.exp(0.5 * log_variance)
         random = torch.randn_like(std)
-        z = mean + random * std
-        x = torch.zeros(nodes.shape[0], self.channels)
-        y = self.decoder(x, z, matrix_forward, problem_index)
-        return mean, variance, y
+        x = mean + random * std
+        x = x.unsqueeze(dim=0).repeat(nodes.shape[0], 1)
+        reconstruction = self.decoder(x, sources, targets)
+        return mean, log_variance, reconstruction
+
+    def encode(self, nodes, sources, targets):
+        return self.encoder(nodes, sources, targets)[0]

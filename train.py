@@ -6,12 +6,13 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from data import Problems
-from model import Model, EPS
+from model import Model
 
-LR = 1e-3
+LR = 5e-3
 GAMMA = 0.9995
 MOMENTUM = 0.9
 BATCH = 32
+DIVERGENCE_WEIGHT = 0.1
 
 if __name__ == '__main__':
     model = Model().to('cuda')
@@ -37,13 +38,13 @@ if __name__ == '__main__':
             nodes = nodes.to('cuda')
             sources = sources.to('cuda')
             targets = targets.to('cuda')
-            mean, log_variance, reconstruction = model(nodes, sources, targets)
+            mean, logvar, reconstruction = model(nodes, sources, targets)
 
             reconstruction_loss = F.cross_entropy(reconstruction, nodes)
             divergence_loss = -0.5 * torch.mean(
-                1 + log_variance - mean.pow(2) - log_variance.exp()
+                1 + logvar - mean.pow(2) - logvar.exp()
             )
-            loss = reconstruction_loss + divergence_loss
+            loss = reconstruction_loss + DIVERGENCE_WEIGHT * divergence_loss
             (loss / BATCH).backward()
 
             writer.add_scalar(
@@ -61,6 +62,7 @@ if __name__ == '__main__':
                 loss,
                 step
             )
+
             step += 1
             if step % BATCH == 0:
                 writer.add_scalar(

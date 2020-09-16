@@ -13,7 +13,7 @@ def problems(blacklist, randomise=True):
         if path in blacklist:
             continue
         nodes, sources, targets = graph_of(path)
-        if nodes.shape[0] > 80000:
+        if nodes.shape[0] > 50000:
             blacklist.add(path)
             continue
         nodes = torch.tensor(nodes)

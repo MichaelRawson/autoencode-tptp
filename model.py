@@ -7,7 +7,6 @@ NODE_TYPES = 13
 CHANNELS = 32
 DIMENSIONS = 16
 LAYERS = 8
-EPS = 1e-8
 
 class Conv(Module):
     def __init__(self):
@@ -38,7 +37,7 @@ class Encoder(Module):
         self.embed = Embedding(NODE_TYPES, CHANNELS)
         self.conv = ModuleList([BiConv() for _ in range(LAYERS)])
         self.mean = Linear(CHANNELS, DIMENSIONS)
-        self.variance = Linear(CHANNELS, DIMENSIONS)
+        self.logvar = Linear(CHANNELS, DIMENSIONS)
 
     def forward(self, nodes, sources, targets):
         x = self.embed(nodes)
@@ -46,9 +45,7 @@ class Encoder(Module):
             x += conv(x, sources, targets)
 
         x = torch.mean(x, dim=0)
-        mean = self.mean(x)
-        log_variance = self.variance(x)
-        return mean, log_variance
+        return self.mean(x), self.logvar(x)
 
 class Decoder(Module):
     def __init__(self):
@@ -58,11 +55,11 @@ class Decoder(Module):
         self.output = Linear(CHANNELS, NODE_TYPES)
 
     def forward(self, x, sources, targets):
-        x = relu(self.input(x))
+        x = self.input(x)
         for conv in self.conv:
             x += conv(x, sources, targets)
 
-        x = self.output(relu(x))
+        x = self.output(x)
         return x
 
 class Model(Module):
@@ -72,13 +69,13 @@ class Model(Module):
         self.decoder = Decoder()
 
     def forward(self, nodes, sources, targets):
-        mean, log_variance = self.encoder(nodes, sources, targets)
-        std = torch.exp(0.5 * log_variance)
+        mean, logvar = self.encoder(nodes, sources, targets)
+        std = torch.exp(0.5 * logvar)
         random = torch.randn_like(std)
         x = mean + random * std
         x = x.unsqueeze(dim=0).repeat(nodes.shape[0], 1)
         reconstruction = self.decoder(x, sources, targets)
-        return mean, log_variance, reconstruction
+        return mean, logvar, reconstruction
 
     def encode(self, nodes, sources, targets):
         return self.encoder(nodes, sources, targets)[0]

@@ -5,3 +5,5 @@ tptp-graph/Axioms
 tptp-graph/Problems
 tptp-graph/*.dat
 tptp-graph/*.lock
+venv/
+*~

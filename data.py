@@ -8,9 +8,9 @@ from tptp_graph import graph_of
 
 
 class Problems(IterableDataset):
-    def __init__(self, paths = glob('Problems/**/*+*.p'), randomise=True):
-        self.blacklist = set()
-        self.paths = paths
+    def __init__(self, paths=None, blacklist=None, randomise=True):
+        self.blacklist = set() if blacklist is None else blacklist
+        self.paths = glob("Problems/**/*+*.p") if paths is None else paths
         self.randomise = randomise
 
     def __iter__(self):

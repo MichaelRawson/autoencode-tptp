@@ -4,9 +4,11 @@ use pyo3::prelude::*;
 use std::fs;
 use std::mem;
 use std::path::Path;
-use tptp::parsers::TPTPIterator;
-use tptp::syntax::*;
+use tptp::common::*;
+use tptp::fof::*;
+use tptp::top::*;
 use tptp::visitor::Visitor;
+use tptp::TPTPIterator;
 
 #[repr(i64)]
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +60,7 @@ impl TPTP {
         self.to.push(to);
     }
 
-    fn equation(&mut self, left: &FofTerm, right: &FofTerm) {
+    fn equation(&mut self, left: &Term, right: &Term) {
         self.visit_fof_term(left);
         let left = self.save;
         self.visit_fof_term(right);
@@ -101,7 +103,7 @@ impl TPTP {
     }
 
     fn or(&mut self, mut indices: Vec<NodeIndex>) {
-        indices.sort();
+        indices.sort_unstable();
         indices.dedup();
         if let Some(or_index) = self.disjunctions.get(&indices) {
             self.save = *or_index;
@@ -115,7 +117,7 @@ impl TPTP {
     }
 
     fn and(&mut self, mut indices: Vec<NodeIndex>) {
-        indices.sort();
+        indices.sort_unstable();
         indices.dedup();
         if let Some(and_index) = self.conjunctions.get(&indices) {
             self.save = *and_index;
@@ -145,7 +147,7 @@ impl TPTP {
 
 impl Visitor<'_> for TPTP {
     fn visit_include(&mut self, include: &Include) {
-        let path = Path::new(include.file_name.as_ref().as_ref().as_ref());
+        let path = Path::new(include.file_name.0 .0);
         self.file(path);
     }
 
@@ -182,10 +184,10 @@ impl Visitor<'_> for TPTP {
         }
     }
 
-    fn visit_fof_plain_term(&mut self, term: &FofPlainTerm) {
+    fn visit_fof_plain_term(&mut self, term: &PlainTerm) {
         match term {
-            FofPlainTerm::Constant(functor) => self.visit_functor(&functor.0),
-            FofPlainTerm::Function(functor, arguments) => {
+            PlainTerm::Constant(functor) => self.visit_functor(&functor.0),
+            PlainTerm::Function(functor, arguments) => {
                 self.visit_functor(&functor);
                 let functor_index = self.save;
 
@@ -214,15 +216,12 @@ impl Visitor<'_> for TPTP {
         }
     }
 
-    fn visit_fof_defined_infix_formula(
-        &mut self,
-        infix: &FofDefinedInfixFormula,
-    ) {
+    fn visit_fof_defined_infix_formula(&mut self, infix: &DefinedInfixFormula) {
         self.equation(&infix.left, &infix.right);
     }
 
-    fn visit_fof_unary_formula(&mut self, unary: &FofUnaryFormula) {
-        use FofUnaryFormula::*;
+    fn visit_fof_unary_formula(&mut self, unary: &UnaryFormula) {
+        use UnaryFormula::*;
         match unary {
             Unary(_, unit) => {
                 self.visit_fof_unit_formula(&unit);
@@ -234,11 +233,8 @@ impl Visitor<'_> for TPTP {
         self.negation();
     }
 
-    fn visit_fof_quantified_formula(
-        &mut self,
-        quantified: &FofQuantifiedFormula,
-    ) {
-        use FofQuantifier::*;
+    fn visit_fof_quantified_formula(&mut self, quantified: &QuantifiedFormula) {
+        use Quantifier::*;
         let node_type = match quantified.quantifier {
             Forall => NodeType::Forall,
             Exists => NodeType::Exists,
@@ -274,7 +270,7 @@ impl Visitor<'_> for TPTP {
         self.save = quantifier_index;
     }
 
-    fn visit_fof_binary_nonassoc(&mut self, nonassoc: &FofBinaryNonassoc) {
+    fn visit_fof_binary_nonassoc(&mut self, nonassoc: &BinaryNonassoc) {
         use NonassocConnective::*;
 
         self.visit_fof_unit_formula(&nonassoc.left);
@@ -311,7 +307,7 @@ impl Visitor<'_> for TPTP {
         }
     }
 
-    fn visit_fof_or_formula(&mut self, or: &FofOrFormula) {
+    fn visit_fof_or_formula(&mut self, or: &OrFormula) {
         let mut child_indices = vec![];
         for child in &or.0 {
             self.visit_fof_unit_formula(child);
@@ -320,7 +316,7 @@ impl Visitor<'_> for TPTP {
         self.or(child_indices);
     }
 
-    fn visit_fof_and_formula(&mut self, and: &FofAndFormula) {
+    fn visit_fof_and_formula(&mut self, and: &AndFormula) {
         let mut child_indices = vec![];
         for child in &and.0 {
             self.visit_fof_unit_formula(child);
@@ -331,9 +327,9 @@ impl Visitor<'_> for TPTP {
 
     fn visit_fof_annotated(&mut self, annotated: &FofAnnotated) {
         self.variables.clear();
-        self.visit_fof_formula(&annotated.formula);
-        let node_type = match annotated.role {
-            FormulaRole::Conjecture => NodeType::Conjecture,
+        self.visit_fof_formula(&annotated.0.formula);
+        let node_type = match annotated.0.role.0 .0 {
+            "conjecture" => NodeType::Conjecture,
             _ => NodeType::Axiom,
         };
         let input_index = self.node(node_type);
@@ -345,7 +341,7 @@ impl Visitor<'_> for TPTP {
 
 #[pymodule]
 fn tptp_graph(_python: Python, module: &PyModule) -> PyResult<()> {
-    #[pyfn(module, "graph_of")]
+    #[pyfn(module)]
     fn graph_of<'py>(
         python: Python<'py>,
         path: &str,

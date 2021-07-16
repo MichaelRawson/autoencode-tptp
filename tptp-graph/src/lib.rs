@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use std::fs;
 use std::mem;
 use std::path::Path;
+use tptp::cnf::{Disjunction, Literal};
 use tptp::common::*;
 use tptp::fof::*;
 use tptp::top::*;
@@ -325,11 +326,52 @@ impl Visitor<'_> for TPTP {
         self.and(child_indices);
     }
 
+    fn visit_literal(&mut self, literal: &Literal) {
+        use Literal::*;
+        match literal {
+            Atomic(f) => {
+                self.visit_fof_atomic_formula(f);
+            }
+            NegatedAtomic(f) => {
+                self.visit_fof_atomic_formula(f);
+                self.negation();
+            }
+            Infix(infix) => {
+                self.equation(&infix.left, &infix.right);
+                self.negation();
+            }
+        }
+    }
+
+    fn visit_disjunction(&mut self, or: &Disjunction) {
+        let mut child_indices = vec![];
+        for child in &or.0 {
+            self.visit_literal(child);
+            child_indices.push(self.save);
+        }
+        if child_indices.len() > 1 {
+            self.or(child_indices);
+        }
+    }
+
     fn visit_fof_annotated(&mut self, annotated: &FofAnnotated) {
         self.variables.clear();
         self.visit_fof_formula(&annotated.0.formula);
         let node_type = match annotated.0.role.0 .0 {
             "conjecture" => NodeType::Conjecture,
+            _ => NodeType::Axiom,
+        };
+        let input_index = self.node(node_type);
+        self.edge(input_index, self.save);
+        self.inputs.push(input_index);
+        self.save = input_index;
+    }
+
+    fn visit_cnf_annotated(&mut self, annotated: &CnfAnnotated) {
+        self.variables.clear();
+        self.visit_cnf_formula(&annotated.0.formula);
+        let node_type = match annotated.0.role.0 .0 {
+            "negated_conjecture" => NodeType::Conjecture,
             _ => NodeType::Axiom,
         };
         let input_index = self.node(node_type);

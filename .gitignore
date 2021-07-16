@@ -1,9 +1,8 @@
+/Axioms
+/Problems
+/runs/
+/venv/
+/tptp-graph/target
+/tptp_graph.so
 __pycache__
-figs/
-runs/
-tptp-graph/Axioms
-tptp-graph/Problems
-tptp-graph/*.dat
-tptp-graph/*.lock
-venv/
 *~

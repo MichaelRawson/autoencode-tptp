@@ -4,6 +4,7 @@ from torch.optim import SGD
 from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from data import Problems
 from model import Model
@@ -33,8 +34,7 @@ if __name__ == '__main__':
             num_workers=1,
             pin_memory=True
         )
-        for problem, nodes, sources, targets in loader:
-            print(problem)
+        for problem, nodes, sources, targets in tqdm(loader):
             nodes = nodes.to('cuda')
             sources = sources.to('cuda')
             targets = targets.to('cuda')

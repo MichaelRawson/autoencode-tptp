@@ -1,12 +1,17 @@
 # Autoencoding TPTP
 
 This repo supplements the [paper](http://aitp-conference.org/2020/abstract/paper_27.pdf) by Michael Rawson and Giles Reger.
+Later work by @inpefess, thanks!
+
+# License
+MIT licensed.
 
 # Before running
 
 * install Python dependencies (e.g. `poetry install` should work)
 * from `tptp-graph` folder run `maturin build` (for this you'll need Rust installation on your system)
 * from project root run `pip install tptp-graph/target/wheel/wheel-of-your-choice.whl`
+   * you may find it easier to `cargo build --release` in `/tptp-graph`, followed by symlinking `/tptp-graph/target/release/libtptp_graph.so` to `/tptp_graph.so` for the preceding two steps
 * subfolders `Problems` and `Axioms` should be in your working folder (either run scripts from TPTP folder or create symbolic links in the project root)
 
 # Training
